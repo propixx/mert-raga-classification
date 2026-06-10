@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+data/raw/
+data/processed/*.wav
+embeddings/**/*.npy
+models/**/*.pt
+models/**/*.pkl
+results/figures/*.png
+results/metrics/*.json
+results/metrics/*.csv
+benchmark_outputs/

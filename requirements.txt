@@ -1,0 +1,17 @@
+torch>=2.0
+torchaudio>=2.0
+transformers==4.41.0
+librosa>=0.10
+soundfile
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+umap-learn
+tensorboard
+tqdm
+pyyaml
+mirdata
+joblib
+nnAudio

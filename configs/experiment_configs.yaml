@@ -1,0 +1,62 @@
+experiments:
+  - name: mert_95m_frozen
+    hf_model: m-a-p/MERT-v1-95M
+    embedding_source: mert_95m
+    freeze_mode: frozen
+    lr: 0.001
+    epochs: 20
+    batch_size: 32
+    weight_decay: 0.01
+    classifier_dropout: 0.2
+
+  - name: mert_95m_partial_unfreeze
+    hf_model: m-a-p/MERT-v1-95M
+    embedding_source: mert_95m
+    freeze_mode: partial
+    unfreeze_last_n: 4
+    lr: 0.00005
+    epochs: 15
+    batch_size: 16
+    weight_decay: 0.01
+    classifier_dropout: 0.2
+
+  - name: mert_95m_full_finetune
+    hf_model: m-a-p/MERT-v1-95M
+    embedding_source: mert_95m
+    freeze_mode: full
+    lr: 0.00001
+    epochs: 10
+    batch_size: 8
+    weight_decay: 0.01
+    classifier_dropout: 0.2
+
+  - name: culturemert_95m_frozen
+    hf_model: ntua-slp/CultureMERT-95M
+    embedding_source: culturemert_95m
+    freeze_mode: frozen
+    lr: 0.001
+    epochs: 20
+    batch_size: 32
+    weight_decay: 0.01
+    classifier_dropout: 0.2
+
+  - name: culturemert_95m_partial_unfreeze
+    hf_model: ntua-slp/CultureMERT-95M
+    embedding_source: culturemert_95m
+    freeze_mode: partial
+    unfreeze_last_n: 4
+    lr: 0.00005
+    epochs: 15
+    batch_size: 16
+    weight_decay: 0.01
+    classifier_dropout: 0.2
+
+  - name: culturemert_95m_full_finetune
+    hf_model: ntua-slp/CultureMERT-95M
+    embedding_source: culturemert_95m
+    freeze_mode: full
+    lr: 0.00001
+    epochs: 10
+    batch_size: 8
+    weight_decay: 0.01
+    classifier_dropout: 0.2
