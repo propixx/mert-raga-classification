@@ -1,5 +1,7 @@
 # Task 1: Foundation Models for Raga Classification
 
+[![Open balanced benchmark in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/propixx/mert-raga-classification/blob/main/notebooks/02_balanced_raga_benchmark_colab.ipynb)
+
 This project compares MERT-v1-95M and CultureMERT-95M on Indian classical raga classification using the Saraga Carnatic dataset.
 
 The core idea is to keep the experiment simple and honest:
