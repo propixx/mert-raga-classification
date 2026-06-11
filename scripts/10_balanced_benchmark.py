@@ -23,6 +23,7 @@ import json
 import os
 import random
 import shutil
+import unicodedata
 import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -76,8 +77,14 @@ def parse_args() -> argparse.Namespace:
         help="Attached Kaggle Saraga root containing numbered folders with JSON and MP3 files",
     )
     parser.add_argument("--output-dir", default="benchmark_outputs")
-    parser.add_argument("--num-ragas", type=int, default=6)
-    parser.add_argument("--tracks-per-raga", type=int, default=6)
+    parser.add_argument("--num-ragas", type=int, default=5)
+    parser.add_argument("--tracks-per-raga", type=int, default=5)
+    parser.add_argument(
+        "--exclude-raga",
+        action="append",
+        default=[],
+        help="Raga label to exclude; matching ignores accents, punctuation and case",
+    )
     parser.add_argument("--segments-per-track", type=int, default=4)
     parser.add_argument("--segment-seconds", type=float, default=30.0)
     parser.add_argument("--batch-size", type=int, default=2)
@@ -104,6 +111,7 @@ def experiment_config(args: argparse.Namespace) -> dict[str, Any]:
         "source_mode": "kaggle_input" if getattr(args, "kaggle_data_root", None) else "mirdata",
         "num_ragas": args.num_ragas,
         "tracks_per_raga": args.tracks_per_raga,
+        "excluded_ragas": sorted(getattr(args, "exclude_raga", [])),
         "segments_per_track": args.segments_per_track,
         "segment_seconds": args.segment_seconds,
         "sample_rate": SAMPLE_RATE,
@@ -115,6 +123,14 @@ def experiment_config(args: argparse.Namespace) -> dict[str, Any]:
 def config_fingerprint(config: dict[str, Any]) -> str:
     encoded = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:12]
+
+
+def normalized_label(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(
+        char for char in decomposed.casefold()
+        if char.isalnum() and not unicodedata.combining(char)
+    )
 
 
 def metadata_name(value: Any) -> str | None:
@@ -230,14 +246,29 @@ def collect_kaggle_tracks(data_root: Path) -> list[dict[str, str]]:
     return rows
 
 
+def kaggle_file_counts(data_root: Path) -> dict[str, int]:
+    counts = {"audio_files": 0, "metadata_files": 0}
+    for _, _, files in os.walk(data_root, followlinks=True):
+        for filename in files:
+            suffix = Path(filename).suffix.lower()
+            if suffix in {".mp3", ".wav", ".flac", ".m4a"}:
+                counts["audio_files"] += 1
+            elif suffix == ".json":
+                counts["metadata_files"] += 1
+    return counts
+
+
 def choose_balanced_tracks(
     rows: list[dict[str, str]],
     num_ragas: int,
     tracks_per_raga: int,
+    excluded_ragas: list[str] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    excluded = {normalized_label(name) for name in (excluded_ragas or [])}
     for row in rows:
-        grouped[row["raga"]].append(row)
+        if normalized_label(row["raga"]) not in excluded:
+            grouped[row["raga"]].append(row)
 
     eligible = [(raga, tracks) for raga, tracks in grouped.items() if len(tracks) >= tracks_per_raga]
     eligible.sort(key=lambda item: (-len(item[1]), item[0].lower()))
@@ -246,7 +277,8 @@ def choose_balanced_tracks(
         counts = sorted(((name, len(items)) for name, items in grouped.items()), key=lambda item: -item[1])
         raise RuntimeError(
             f"Only {len(selected)} ragas have at least {tracks_per_raga} tracks. "
-            f"Reduce --num-ragas or --tracks-per-raga. Top counts: {counts[:15]}"
+            f"Reduce --num-ragas or --tracks-per-raga. "
+            f"Excluded labels: {excluded_ragas or []}. Top counts: {counts[:15]}"
         )
 
     rng = random.Random(RANDOM_SEED)
@@ -255,6 +287,68 @@ def choose_balanced_tracks(
         tracks = sorted(tracks, key=lambda item: item["track_id"])
         output[raga] = rng.sample(tracks, tracks_per_raga)
     return output
+
+
+def write_preflight_report(
+    output_dir: Path,
+    args: argparse.Namespace,
+    source_counts: dict[str, int],
+    rows: list[dict[str, str]],
+    selected: dict[str, list[dict[str, str]]],
+    splits: dict[str, list[dict[str, str]]],
+) -> None:
+    raga_counts = Counter(row["raga"] for row in rows)
+    disk = shutil.disk_usage(output_dir)
+    payload = {
+        "source_files": source_counts,
+        "usable_labeled_tracks": len(rows),
+        "all_raga_track_counts": dict(raga_counts.most_common()),
+        "excluded_ragas": args.exclude_raga,
+        "selected_ragas": {name: len(items) for name, items in selected.items()},
+        "split_tracks": {
+            split: {
+                "total": len(items),
+                "per_raga": dict(Counter(item["raga"] for item in items)),
+            }
+            for split, items in splits.items()
+        },
+        "expected_clips": {
+            split: len(items) * args.segments_per_track
+            for split, items in splits.items()
+        },
+        "disk_gb": {
+            "total": round(disk.total / 1e9, 2),
+            "used": round(disk.used / 1e9, 2),
+            "free": round(disk.free / 1e9, 2),
+        },
+    }
+    json_dump(output_dir / "metrics" / "preflight.json", payload)
+
+    print("\n" + "=" * 68)
+    print("PREFLIGHT: dataset and split verification")
+    print("=" * 68)
+    print(
+        f"Source files: {source_counts['audio_files']} audio, "
+        f"{source_counts['metadata_files']} metadata"
+    )
+    print(f"Usable labeled tracks: {len(rows)}")
+    print(f"Excluded labels: {args.exclude_raga or ['none']}")
+    print("Top raga counts:")
+    for raga, count in raga_counts.most_common(15):
+        print(f"  {raga}: {count}")
+    print("Selected ragas:")
+    for raga, items in selected.items():
+        print(f"  {raga}: {len(items)} tracks")
+    print("Track splits:")
+    for split, items in splits.items():
+        distribution = Counter(item["raga"] for item in items)
+        expected_clips = len(items) * args.segments_per_track
+        print(
+            f"  {split}: {len(items)} tracks, {expected_clips} expected clips, "
+            f"{dict(distribution)}"
+        )
+    print(f"Free working disk: {disk.free / 1e9:.2f} GB")
+    print("=" * 68 + "\n")
 
 
 def split_tracks(selected: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
@@ -1029,7 +1123,7 @@ def write_report(
             "",
             "## Limitations And Possible Drawbacks",
             "",
-            "- Only six recordings per raga are used, so results may change with a different track selection.",
+            f"- Only {args.tracks_per_raga} recordings per raga are used, so results may change with a different track selection.",
             "- A 30-second excerpt gives more melodic context than an 8-second excerpt, but a complete raga performance develops over much longer periods.",
             "- The external neural head has more parameters than the linear probe and can overfit this small dataset. Its training and validation curves should be checked.",
             "- The backbones are frozen, so this experiment does not show whether full fine-tuning would improve accuracy or damage general musical representations.",
@@ -1101,6 +1195,7 @@ def main() -> None:
             raise RuntimeError("--kaggle-data-root currently supports Saraga Carnatic only.")
         kaggle_data_root = Path(args.kaggle_data_root).resolve()
         print(f"Using attached Kaggle Saraga data: {kaggle_data_root}")
+        source_counts = kaggle_file_counts(kaggle_data_root)
         rows = collect_kaggle_tracks(kaggle_data_root)
     else:
         data_home = Path(args.data_home).resolve()
@@ -1126,14 +1221,24 @@ def main() -> None:
                 f"Original error: {exc}"
             ) from exc
         rows = collect_tracks(dataset, args.dataset)
+        source_counts = {
+            "audio_files": len(rows),
+            "metadata_files": len(rows),
+        }
 
     print(f"Usable labeled tracks: {len(rows)}")
-    selected = choose_balanced_tracks(rows, args.num_ragas, args.tracks_per_raga)
+    selected = choose_balanced_tracks(
+        rows,
+        args.num_ragas,
+        args.tracks_per_raga,
+        args.exclude_raga,
+    )
     print("Selected ragas:")
     for raga, tracks in selected.items():
         print(f"  {raga}: {len(tracks)} tracks")
 
     splits = split_tracks(selected)
+    write_preflight_report(output_dir, args, source_counts, rows, selected, splits)
     json_dump(metrics_dir / "track_splits.json", splits)
     manifests = prepare_clips(
         splits,

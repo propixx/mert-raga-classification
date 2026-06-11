@@ -31,14 +31,19 @@ Compared with the first quick run, it improves the experimental setup by:
 - comparing a linear probe with a `768 -> 256 -> 6` external neural head;
 - caching each completed model/split embedding file for interrupted runs.
 
-The notebook is intentionally limited to six well-supported ragas, six tracks
-per raga and approximately 144 clips. The original MERT and CultureMERT
-backbones remain frozen. Only the lightweight classifiers are trained.
+The verified Kaggle dataset supports five single-raga classes with five tracks
+each: Kamās, Saurāṣtraṁ, Tōḍi, Behāg and Bhairavi. `Rāgamālika` is excluded
+because it is a multi-raga category. The 3/1/1 track split and four clips per
+track produce 60 training, 20 validation and 20 test clips. The original MERT
+and CultureMERT backbones remain frozen; only the lightweight classifiers are
+trained.
 
 Before running it, attach Kaggle's
 [`desolationofsmaug/saraga-carnatic-music-dataset`](https://www.kaggle.com/datasets/desolationofsmaug/saraga-carnatic-music-dataset)
 as a notebook Input. The current full Zenodo archive is about 14.4 GB before
-extraction and does not fit safely on Kaggle's working disk.
+extraction and does not fit safely on Kaggle's working disk. If the Input is
+not mounted, the notebook downloads and reuses Kaggle's smaller copy under
+`/kaggle/working/saraga_kaggle`.
 
 The earlier eight-second Colab notebook is kept as a quick pipeline check:
 [`notebooks/02_balanced_raga_benchmark_colab.ipynb`](notebooks/02_balanced_raga_benchmark_colab.ipynb).
