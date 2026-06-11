@@ -1128,11 +1128,6 @@ def write_report(
             "- The external neural head has more parameters than the linear probe and can overfit this small dataset. Its training and validation curves should be checked.",
             "- The backbones are frozen, so this experiment does not show whether full fine-tuning would improve accuracy or damage general musical representations.",
             "- Recording conditions, performer identity, tonic and instrumentation can still influence predictions even with a track-level split.",
-            "",
-            "## Reference Comparison",
-            "",
-            "The related `ritgit24/MERT` project reports results on a much larger Hindustani setup. "
-            "This notebook borrows its useful ideas (top-k accuracy and embedding-cluster metrics) but keeps 24 kHz MERT input and track-level leakage protection.",
         ]
     )
     path.write_text("\n".join(lines), encoding="utf-8")

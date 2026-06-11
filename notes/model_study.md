@@ -123,12 +123,12 @@ The scripts use this path through the project:
 Saraga tracks
   -> metadata exploration
   -> top raga selection
-  -> 24 kHz / mono / 10 second clips
-  -> track-level train/val/test splits
+  -> 24 kHz / mono / 30 second clips
+  -> five track-wise train/validation/test rotations
   -> all-layer embeddings
-  -> t-SNE and UMAP
+  -> t-SNE and cluster measurements
   -> layer-wise logistic regression probe
-  -> supervised fine-tuning
+  -> supervised external head with frozen backbones
   -> final comparison table
 ```
 
