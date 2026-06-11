@@ -8,6 +8,7 @@ small enough for a project-selection task while producing meaningful outputs:
 - train/validation/test split by original track
 - embeddings from all 13 layers of both 95M models
 - layer-wise linear probes
+- a small external neural classifier with early stopping
 - clip-level and track-level top-1/top-3 metrics
 - macro F1, confusion matrices, t-SNE, silhouette and Davies-Bouldin scores
 - a generated Markdown report and a downloadable result zip
@@ -16,6 +17,8 @@ small enough for a project-selection task while producing meaningful outputs:
 from __future__ import annotations
 
 import argparse
+import gc
+import hashlib
 import json
 import os
 import random
@@ -34,6 +37,8 @@ import pandas as pd
 import seaborn as sns
 import soundfile as sf
 import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 from sklearn.linear_model import LogisticRegression
 from sklearn.manifold import TSNE
 from sklearn.metrics import (
@@ -68,9 +73,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="benchmark_outputs")
     parser.add_argument("--num-ragas", type=int, default=6)
     parser.add_argument("--tracks-per-raga", type=int, default=6)
-    parser.add_argument("--segments-per-track", type=int, default=6)
-    parser.add_argument("--segment-seconds", type=float, default=8.0)
-    parser.add_argument("--batch-size", type=int, default=6)
+    parser.add_argument("--segments-per-track", type=int, default=4)
+    parser.add_argument("--segment-seconds", type=float, default=30.0)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--head-hidden-dim", type=int, default=256)
+    parser.add_argument("--head-dropout", type=float, default=0.2)
+    parser.add_argument("--head-lr", type=float, default=1e-3)
+    parser.add_argument("--head-epochs", type=int, default=100)
+    parser.add_argument("--head-patience", type=int, default=12)
     parser.add_argument("--skip-download", action="store_true")
     parser.add_argument("--force-clips", action="store_true")
     parser.add_argument("--force-embeddings", action="store_true")
@@ -81,6 +91,24 @@ def json_dump(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(value, handle, indent=2, ensure_ascii=False)
+
+
+def experiment_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "dataset": args.dataset,
+        "num_ragas": args.num_ragas,
+        "tracks_per_raga": args.tracks_per_raga,
+        "segments_per_track": args.segments_per_track,
+        "segment_seconds": args.segment_seconds,
+        "sample_rate": SAMPLE_RATE,
+        "random_seed": RANDOM_SEED,
+        "models": MODELS,
+    }
+
+
+def config_fingerprint(config: dict[str, Any]) -> str:
+    encoded = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:12]
 
 
 def metadata_name(value: Any) -> str | None:
@@ -209,6 +237,7 @@ def prepare_clips(
     clips_dir.mkdir(parents=True, exist_ok=True)
     manifests: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
     samples_needed = int(round(segment_seconds * SAMPLE_RATE))
+    failures = []
 
     for split_name, tracks in splits.items():
         split_dir = clips_dir / split_name
@@ -216,9 +245,10 @@ def prepare_clips(
         for row in tqdm(tracks, desc=f"Creating {split_name} clips"):
             try:
                 duration = float(librosa.get_duration(path=row["audio_path"]))
-                offsets = segment_offsets(duration, segment_seconds, segments_per_track)
+                candidate_count = max(segments_per_track * 3, segments_per_track)
+                offsets = segment_offsets(duration, segment_seconds, candidate_count)
                 saved = 0
-                for offset_idx, offset in enumerate(offsets):
+                for offset in offsets:
                     audio, _ = librosa.load(
                         row["audio_path"],
                         sr=SAMPLE_RATE,
@@ -233,7 +263,7 @@ def prepare_clips(
                     if float(np.max(np.abs(audio))) < 0.01:
                         continue
 
-                    filename = f"{safe_name(row['track_id'])}_s{offset_idx:02d}.wav"
+                    filename = f"{safe_name(row['track_id'])}_s{saved:02d}.wav"
                     path = split_dir / filename
                     sf.write(path, audio, SAMPLE_RATE)
                     manifests[split_name].append(
@@ -245,10 +275,44 @@ def prepare_clips(
                         }
                     )
                     saved += 1
-                if saved == 0:
-                    print(f"WARNING: no usable clips from {row['audio_path']}")
+                    if saved == segments_per_track:
+                        break
+                if saved < segments_per_track:
+                    failures.append(
+                        {
+                            "split": split_name,
+                            "track_id": row["track_id"],
+                            "raga": row["raga"],
+                            "audio_path": row["audio_path"],
+                            "clips_found": saved,
+                            "clips_required": segments_per_track,
+                        }
+                    )
             except Exception as exc:
-                print(f"WARNING: failed to segment {row['audio_path']}: {exc}")
+                failures.append(
+                    {
+                        "split": split_name,
+                        "track_id": row["track_id"],
+                        "raga": row["raga"],
+                        "audio_path": row["audio_path"],
+                        "error": str(exc),
+                        "clips_found": 0,
+                        "clips_required": segments_per_track,
+                    }
+                )
+
+    if failures:
+        json_dump(clips_dir / "clip_failures.json", failures)
+        preview = "\n".join(
+            f"  {item['split']} / {item['raga']} / {item['track_id']}: "
+            f"{item['clips_found']}/{item['clips_required']} clips"
+            for item in failures[:10]
+        )
+        raise RuntimeError(
+            "Some source tracks could not provide enough non-silent 30-second clips. "
+            "Details were saved to clip_failures.json.\n"
+            f"{preview}"
+        )
 
     json_dump(manifest_path, manifests)
     return manifests
@@ -286,21 +350,37 @@ def extract_embeddings(
     batch_size: int,
     force: bool,
 ) -> dict[str, np.ndarray]:
-    cache_path = cache_dir / f"{model_key}.npz"
-    if cache_path.exists() and not force:
-        print(f"Using cached embeddings: {cache_path}")
-        cached = np.load(cache_path, allow_pickle=True)
-        return {key: cached[key] for key in cached.files}
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    output: dict[str, np.ndarray] = {}
+    missing_splits = []
+    for split_name, items in manifests.items():
+        cache_path = cache_dir / f"{model_key}_{split_name}.npz"
+        if cache_path.exists() and not force:
+            print(f"Using cached embeddings: {cache_path}")
+            cached = np.load(cache_path, allow_pickle=True)
+            output[f"{split_name}_embeddings"] = cached["embeddings"]
+            output[f"{split_name}_labels"] = cached["labels"]
+            output[f"{split_name}_tracks"] = cached["tracks"]
+        else:
+            missing_splits.append((split_name, items, cache_path))
+
+    if not missing_splits:
+        return output
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.float16 if device.type == "cuda" else torch.float32
     print(f"\nLoading {hf_name} on {device} ({dtype})")
-    extractor = AutoFeatureExtractor.from_pretrained(hf_name, trust_remote_code=True)
-    model = AutoModel.from_pretrained(hf_name, trust_remote_code=True, torch_dtype=dtype)
+    try:
+        extractor = AutoFeatureExtractor.from_pretrained(hf_name, trust_remote_code=True)
+        model = AutoModel.from_pretrained(hf_name, trust_remote_code=True, torch_dtype=dtype)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not download or load {hf_name}. In Kaggle, enable Internet in "
+            f"Notebook settings and rerun. Original error: {exc}"
+        ) from exc
     model.eval().to(device)
 
-    output: dict[str, np.ndarray] = {}
-    for split_name, items in manifests.items():
+    for split_name, items, cache_path in missing_splits:
         layer_batches: list[list[np.ndarray]] | None = None
         for start in tqdm(range(0, len(items), batch_size), desc=f"{model_key} {split_name}"):
             batch_items = items[start : start + batch_size]
@@ -316,11 +396,30 @@ def extract_embeddings(
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
 
-            with torch.inference_mode():
-                model_inputs = {"input_values": input_values, "output_hidden_states": True}
-                if attention_mask is not None:
-                    model_inputs["attention_mask"] = attention_mask
-                hidden_states = model(**model_inputs).hidden_states
+            try:
+                with torch.inference_mode():
+                    model_inputs = {"input_values": input_values, "output_hidden_states": True}
+                    if attention_mask is not None:
+                        model_inputs["attention_mask"] = attention_mask
+                    hidden_states = model(**model_inputs).hidden_states
+            except torch.cuda.OutOfMemoryError as exc:
+                torch.cuda.empty_cache()
+                raise RuntimeError(
+                    "GPU memory was exhausted during 30-second embedding extraction. "
+                    "Rerun with --batch-size 1; completed split caches will be reused."
+                ) from exc
+
+            if hidden_states is None or len(hidden_states) != 13:
+                raise RuntimeError(
+                    f"{hf_name} returned "
+                    f"{0 if hidden_states is None else len(hidden_states)} hidden states; "
+                    "this benchmark expects 13."
+                )
+            if hidden_states[-1].shape[-1] != 768:
+                raise RuntimeError(
+                    f"{hf_name} returned hidden dimension {hidden_states[-1].shape[-1]}; "
+                    "this benchmark expects 768."
+                )
 
             if layer_batches is None:
                 layer_batches = [[] for _ in hidden_states]
@@ -330,16 +429,25 @@ def extract_embeddings(
 
         if layer_batches is None:
             raise RuntimeError(f"No embeddings extracted for {model_key}/{split_name}")
-        output[f"{split_name}_embeddings"] = np.stack(
+        split_embeddings = np.stack(
             [np.concatenate(chunks, axis=0) for chunks in layer_batches],
             axis=0,
         )
-        output[f"{split_name}_labels"] = np.array([item["raga"] for item in items], dtype=object)
-        output[f"{split_name}_tracks"] = np.array([item["track_id"] for item in items], dtype=object)
+        split_labels = np.array([item["raga"] for item in items], dtype=object)
+        split_tracks = np.array([item["track_id"] for item in items], dtype=object)
+        np.savez_compressed(
+            cache_path,
+            embeddings=split_embeddings,
+            labels=split_labels,
+            tracks=split_tracks,
+        )
+        print(f"Saved completed split cache: {cache_path}")
+        output[f"{split_name}_embeddings"] = split_embeddings
+        output[f"{split_name}_labels"] = split_labels
+        output[f"{split_name}_tracks"] = split_tracks
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(cache_path, **output)
     del model
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return output
@@ -362,6 +470,38 @@ def make_probe() -> Pipeline:
     )
 
 
+class ExternalClassifier(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, num_classes: int, dropout: float):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_classes),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.network(inputs)
+
+
+def prediction_metrics(
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    probabilities: np.ndarray,
+    num_classes: int,
+) -> dict[str, float]:
+    top_k = min(3, num_classes)
+    return {
+        "accuracy": float(accuracy_score(labels, predictions)),
+        "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)),
+        "macro_f1": float(f1_score(labels, predictions, average="macro", zero_division=0)),
+        "top_3_accuracy": float(
+            top_k_accuracy_score(labels, probabilities, k=top_k, labels=np.arange(num_classes))
+        ),
+    }
+
+
 def track_probabilities(
     probabilities: np.ndarray,
     labels: np.ndarray,
@@ -376,6 +516,159 @@ def track_probabilities(
         label_values = labels[mask]
         grouped_labels.append(encoder.transform([Counter(label_values).most_common(1)[0][0]])[0])
     return np.stack(grouped_probs), np.array(grouped_labels)
+
+
+def train_external_classifier(
+    model_key: str,
+    train_x: np.ndarray,
+    train_y: np.ndarray,
+    val_x: np.ndarray,
+    val_y: np.ndarray,
+    num_classes: int,
+    args: argparse.Namespace,
+    figures_dir: Path,
+    models_dir: Path,
+) -> tuple[ExternalClassifier, StandardScaler, list[dict[str, float]], int]:
+    scaler = StandardScaler()
+    train_scaled = scaler.fit_transform(train_x).astype(np.float32)
+    val_scaled = scaler.transform(val_x).astype(np.float32)
+
+    train_dataset = TensorDataset(
+        torch.from_numpy(train_scaled),
+        torch.from_numpy(train_y.astype(np.int64)),
+    )
+    generator = torch.Generator().manual_seed(RANDOM_SEED)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=min(16, len(train_dataset)),
+        shuffle=True,
+        generator=generator,
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(RANDOM_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(RANDOM_SEED)
+    model = ExternalClassifier(
+        input_dim=train_x.shape[1],
+        hidden_dim=args.head_hidden_dim,
+        num_classes=num_classes,
+        dropout=args.head_dropout,
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.head_lr,
+        weight_decay=0.01,
+    )
+    criterion = nn.CrossEntropyLoss()
+    val_tensor = torch.from_numpy(val_scaled).to(device)
+
+    history = []
+    best_rank = None
+    best_state = None
+    best_epoch = 0
+    stale_epochs = 0
+
+    for epoch in range(1, args.head_epochs + 1):
+        model.train()
+        loss_sum = 0.0
+        train_predictions = []
+        train_labels = []
+        for batch_x, batch_y in train_loader:
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(batch_x)
+            loss = criterion(logits, batch_y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            loss_sum += float(loss.item()) * len(batch_y)
+            train_predictions.extend(logits.argmax(dim=1).detach().cpu().numpy())
+            train_labels.extend(batch_y.detach().cpu().numpy())
+
+        model.eval()
+        with torch.inference_mode():
+            val_logits = model(val_tensor)
+            val_predictions = val_logits.argmax(dim=1).cpu().numpy()
+
+        train_accuracy = accuracy_score(train_labels, train_predictions)
+        val_accuracy = accuracy_score(val_y, val_predictions)
+        val_macro_f1 = f1_score(val_y, val_predictions, average="macro", zero_division=0)
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": loss_sum / len(train_dataset),
+                "train_accuracy": float(train_accuracy),
+                "val_accuracy": float(val_accuracy),
+                "val_macro_f1": float(val_macro_f1),
+            }
+        )
+
+        rank = (val_macro_f1, val_accuracy, -epoch)
+        if best_rank is None or rank > best_rank:
+            best_rank = rank
+            best_epoch = epoch
+            best_state = {
+                name: value.detach().cpu().clone()
+                for name, value in model.state_dict().items()
+            }
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+            if stale_epochs >= args.head_patience:
+                break
+
+    if best_state is None:
+        raise RuntimeError("The external classifier did not complete a training epoch.")
+    model.load_state_dict(best_state)
+    model.to(device).eval()
+
+    frame = pd.DataFrame(history)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    axes[0].plot(frame["epoch"], frame["train_loss"], label="train loss")
+    axes[0].axvline(best_epoch, color="black", linestyle="--", alpha=0.5)
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Cross-entropy loss")
+    axes[0].set_title("Training loss")
+    axes[1].plot(frame["epoch"], frame["train_accuracy"], label="train accuracy")
+    axes[1].plot(frame["epoch"], frame["val_accuracy"], label="validation accuracy")
+    axes[1].plot(frame["epoch"], frame["val_macro_f1"], label="validation macro F1")
+    axes[1].axvline(best_epoch, color="black", linestyle="--", alpha=0.5)
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Score")
+    axes[1].set_ylim(0, 1.02)
+    axes[1].legend()
+    fig.suptitle(f"{model_key}: external classifier training")
+    plt.tight_layout()
+    plt.savefig(figures_dir / f"{model_key}_external_head_training.png", dpi=160)
+    plt.close()
+
+    joblib.dump(scaler, models_dir / f"{model_key}_external_head_scaler.joblib")
+    torch.save(
+        {
+            "state_dict": best_state,
+            "input_dim": train_x.shape[1],
+            "hidden_dim": args.head_hidden_dim,
+            "num_classes": num_classes,
+            "dropout": args.head_dropout,
+            "best_epoch": best_epoch,
+        },
+        models_dir / f"{model_key}_external_head.pt",
+    )
+    return model, scaler, history, best_epoch
+
+
+def neural_probabilities(
+    model: ExternalClassifier,
+    scaler: StandardScaler,
+    embeddings: np.ndarray,
+) -> np.ndarray:
+    device = next(model.parameters()).device
+    scaled = scaler.transform(embeddings).astype(np.float32)
+    with torch.inference_mode():
+        logits = model(torch.from_numpy(scaled).to(device))
+        return torch.softmax(logits, dim=1).cpu().numpy()
 
 
 def plot_layer_curve(model_key: str, layer_rows: list[dict[str, Any]], best_layer: int, path: Path) -> None:
@@ -422,6 +715,7 @@ def evaluate_model(
     data: dict[str, np.ndarray],
     figures_dir: Path,
     models_dir: Path,
+    args: argparse.Namespace,
 ) -> dict[str, Any]:
     figures_dir.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -466,16 +760,7 @@ def evaluate_model(
     test_x = data["test_embeddings"][best_layer]
     test_pred = final_probe.predict(test_x)
     test_prob = final_probe.predict_proba(test_x)
-    top_k = min(3, num_classes)
-
-    clip_metrics = {
-        "accuracy": float(accuracy_score(y_test, test_pred)),
-        "balanced_accuracy": float(balanced_accuracy_score(y_test, test_pred)),
-        "macro_f1": float(f1_score(y_test, test_pred, average="macro", zero_division=0)),
-        "top_3_accuracy": float(
-            top_k_accuracy_score(y_test, test_prob, k=top_k, labels=np.arange(num_classes))
-        ),
-    }
+    linear_clip_metrics = prediction_metrics(y_test, test_pred, test_prob, num_classes)
 
     track_prob, track_labels = track_probabilities(
         test_prob,
@@ -484,14 +769,13 @@ def evaluate_model(
         encoder,
     )
     track_pred = track_prob.argmax(axis=1)
-    track_metrics = {
-        "accuracy": float(accuracy_score(track_labels, track_pred)),
-        "macro_f1": float(f1_score(track_labels, track_pred, average="macro", zero_division=0)),
-        "top_3_accuracy": float(
-            top_k_accuracy_score(track_labels, track_prob, k=top_k, labels=np.arange(num_classes))
-        ),
-        "num_test_tracks": int(len(track_labels)),
-    }
+    linear_track_metrics = prediction_metrics(
+        track_labels,
+        track_pred,
+        track_prob,
+        num_classes,
+    )
+    linear_track_metrics["num_test_tracks"] = int(len(track_labels))
 
     scaled_test = StandardScaler().fit_transform(test_x)
     cluster_metrics = {
@@ -499,18 +783,26 @@ def evaluate_model(
         "davies_bouldin": float(davies_bouldin_score(scaled_test, y_test)),
     }
 
-    cm = confusion_matrix(y_test, test_pred, labels=np.arange(num_classes))
-    fig, ax = plt.subplots(figsize=(8, 7))
-    ConfusionMatrixDisplay(cm, display_labels=encoder.classes_).plot(
-        ax=ax,
-        cmap="Blues",
-        xticks_rotation=35,
-        colorbar=False,
-    )
-    ax.set_title(f"{model_key}: test confusion matrix, layer {best_layer}")
-    plt.tight_layout()
-    plt.savefig(figures_dir / f"{model_key}_confusion_matrix.png", dpi=160)
-    plt.close()
+    def save_confusion(predictions: np.ndarray, classifier_name: str) -> None:
+        cm = confusion_matrix(y_test, predictions, labels=np.arange(num_classes))
+        fig, ax = plt.subplots(figsize=(8, 7))
+        ConfusionMatrixDisplay(cm, display_labels=encoder.classes_).plot(
+            ax=ax,
+            cmap="Blues",
+            xticks_rotation=35,
+            colorbar=False,
+        )
+        ax.set_title(
+            f"{model_key}: {classifier_name} test confusion matrix, layer {best_layer}"
+        )
+        plt.tight_layout()
+        plt.savefig(
+            figures_dir / f"{model_key}_{classifier_name}_confusion_matrix.png",
+            dpi=160,
+        )
+        plt.close()
+
+    save_confusion(test_pred, "linear")
 
     plot_tsne(
         test_x,
@@ -522,20 +814,75 @@ def evaluate_model(
     joblib.dump(final_probe, models_dir / f"{model_key}_probe.joblib")
     joblib.dump(encoder, models_dir / f"{model_key}_labels.joblib")
 
+    external_head, external_scaler, head_history, best_epoch = train_external_classifier(
+        model_key=model_key,
+        train_x=data["train_embeddings"][best_layer],
+        train_y=y_train,
+        val_x=data["val_embeddings"][best_layer],
+        val_y=y_val,
+        num_classes=num_classes,
+        args=args,
+        figures_dir=figures_dir,
+        models_dir=models_dir,
+    )
+    neural_test_prob = neural_probabilities(external_head, external_scaler, test_x)
+    neural_test_pred = neural_test_prob.argmax(axis=1)
+    neural_clip_metrics = prediction_metrics(
+        y_test,
+        neural_test_pred,
+        neural_test_prob,
+        num_classes,
+    )
+    neural_track_prob, neural_track_labels = track_probabilities(
+        neural_test_prob,
+        data["test_labels"],
+        data["test_tracks"],
+        encoder,
+    )
+    neural_track_pred = neural_track_prob.argmax(axis=1)
+    neural_track_metrics = prediction_metrics(
+        neural_track_labels,
+        neural_track_pred,
+        neural_track_prob,
+        num_classes,
+    )
+    neural_track_metrics["num_test_tracks"] = int(len(neural_track_labels))
+    save_confusion(neural_test_pred, "external_head")
+
+    del external_head
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return {
         "best_layer": best_layer,
         "classes": list(encoder.classes_),
-        "clip_metrics": clip_metrics,
-        "track_metrics": track_metrics,
         "cluster_metrics": cluster_metrics,
         "layer_results": layer_rows,
-        "classification_report": classification_report(
-            y_test,
-            test_pred,
-            target_names=encoder.classes_,
-            zero_division=0,
-            output_dict=True,
-        ),
+        "linear": {
+            "clip_metrics": linear_clip_metrics,
+            "track_metrics": linear_track_metrics,
+            "classification_report": classification_report(
+                y_test,
+                test_pred,
+                target_names=encoder.classes_,
+                zero_division=0,
+                output_dict=True,
+            ),
+        },
+        "external_head": {
+            "best_epoch": best_epoch,
+            "history": head_history,
+            "clip_metrics": neural_clip_metrics,
+            "track_metrics": neural_track_metrics,
+            "classification_report": classification_report(
+                y_test,
+                neural_test_pred,
+                target_names=encoder.classes_,
+                zero_division=0,
+                output_dict=True,
+            ),
+        },
     }
 
 
@@ -560,35 +907,67 @@ def write_report(
         f"- Clip duration: {args.segment_seconds:.1f} seconds at 24 kHz",
         f"- Train/validation/test clips: {len(manifests['train'])}/{len(manifests['val'])}/{len(manifests['test'])}",
         "- Split unit: original track, not clip",
+        "- Backbones: frozen; no MERT or CultureMERT weights are updated",
+        "- Linear probe: selected on validation macro F1, then fitted on train + validation",
+        "- External head: trained on train embeddings with validation-based early stopping",
         "",
         "## Results",
         "",
-        "| Model | Best layer | Clip accuracy | Clip macro F1 | Clip top-3 | Track accuracy | Track top-3 | Silhouette | Davies-Bouldin |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Model | Classifier | Best layer | Clip accuracy | Clip balanced accuracy | Clip macro F1 | Clip top-3 | Track accuracy | Track balanced accuracy | Track macro F1 | Track top-3 |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for model_key, result in results.items():
-        clip = result["clip_metrics"]
-        track = result["track_metrics"]
+        for classifier_key, classifier_label in (
+            ("linear", "Linear probe"),
+            ("external_head", "External neural head"),
+        ):
+            classifier = result[classifier_key]
+            clip = classifier["clip_metrics"]
+            track = classifier["track_metrics"]
+            lines.append(
+                f"| {model_key} | {classifier_label} | {result['best_layer']} | "
+                f"{clip['accuracy']:.3f} | {clip['balanced_accuracy']:.3f} | "
+                f"{clip['macro_f1']:.3f} | {clip['top_3_accuracy']:.3f} | "
+                f"{track['accuracy']:.3f} | {track['balanced_accuracy']:.3f} | "
+                f"{track['macro_f1']:.3f} | {track['top_3_accuracy']:.3f} |"
+            )
+
+    culture = results["culturemert_95m"]["linear"]["clip_metrics"]["accuracy"]
+    base = results["mert_95m"]["linear"]["clip_metrics"]["accuracy"]
+    delta = culture - base
+    lines.extend(
+        [
+            "",
+            "## Embedding Structure",
+            "",
+            "| Model | Silhouette (higher is better) | Davies-Bouldin (lower is better) |",
+            "|---|---:|---:|",
+        ]
+    )
+    for model_key, result in results.items():
         cluster = result["cluster_metrics"]
         lines.append(
-            f"| {model_key} | {result['best_layer']} | {clip['accuracy']:.3f} | "
-            f"{clip['macro_f1']:.3f} | {clip['top_3_accuracy']:.3f} | "
-            f"{track['accuracy']:.3f} | {track['top_3_accuracy']:.3f} | "
-            f"{cluster['silhouette']:.3f} | {cluster['davies_bouldin']:.3f} |"
+            f"| {model_key} | {cluster['silhouette']:.3f} | "
+            f"{cluster['davies_bouldin']:.3f} |"
         )
 
-    culture = results["culturemert_95m"]["clip_metrics"]["accuracy"]
-    base = results["mert_95m"]["clip_metrics"]["accuracy"]
-    delta = culture - base
     lines.extend(
         [
             "",
             "## Short Reading",
             "",
-            f"CultureMERT minus MERT clip-level accuracy: **{delta:+.3f}**.",
+            f"For the linear probe, CultureMERT minus MERT clip-level accuracy is **{delta:+.3f}**.",
             "",
             "This is a compact benchmark, so the result should be treated as evidence from this split rather than a final claim about all Indian classical music. "
             "The most important methodological choice is the track-level split, which prevents different chunks of the same recording from appearing in train and test.",
+            "",
+            "## Limitations And Possible Drawbacks",
+            "",
+            "- Only six recordings per raga are used, so results may change with a different track selection.",
+            "- A 30-second excerpt gives more melodic context than an 8-second excerpt, but a complete raga performance develops over much longer periods.",
+            "- The external neural head has more parameters than the linear probe and can overfit this small dataset. Its training and validation curves should be checked.",
+            "- The backbones are frozen, so this experiment does not show whether full fine-tuning would improve accuracy or damage general musical representations.",
+            "- Recording conditions, performer identity, tonic and instrumentation can still influence predictions even with a track-level split.",
             "",
             "## Reference Comparison",
             "",
@@ -599,9 +978,9 @@ def write_report(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def package_results(output_dir: Path) -> Path:
+def package_results(output_dir: Path, archive_name: str) -> Path:
     """Package only submission-sized outputs, not cached audio/embeddings."""
-    archive_path = output_dir / "mert_raga_benchmark_results.zip"
+    archive_path = output_dir / archive_name
     if archive_path.exists():
         archive_path.unlink()
     include = [
@@ -629,8 +1008,11 @@ def main() -> None:
     sns.set_theme(style="whitegrid")
 
     output_dir = Path(args.output_dir).resolve()
-    clips_dir = output_dir / "clips"
-    cache_dir = output_dir / "embedding_cache"
+    config = experiment_config(args)
+    fingerprint = config_fingerprint(config)
+    cache_root = output_dir / "cache" / fingerprint
+    clips_dir = cache_root / "clips"
+    cache_dir = cache_root / "embeddings"
     figures_dir = output_dir / "figures"
     metrics_dir = output_dir / "metrics"
     models_dir = output_dir / "models"
@@ -640,14 +1022,35 @@ def main() -> None:
     print(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
+    elif args.segment_seconds >= 30:
+        raise RuntimeError(
+            "A GPU is required for this 30-second benchmark. In Kaggle, open "
+            "Notebook options, select a T4 or P100 accelerator, and rerun."
+        )
+    print(f"Experiment cache fingerprint: {fingerprint}")
+    json_dump(metrics_dir / "experiment_config.json", {**config, "fingerprint": fingerprint})
 
     data_home = Path(args.data_home).resolve()
     data_home.mkdir(parents=True, exist_ok=True)
     dataset = mirdata.initialize(args.dataset, data_home=str(data_home))
     if not args.skip_download:
         print(f"Downloading/validating {args.dataset} at {data_home}")
-        dataset.download()
-    dataset.validate()
+        try:
+            dataset.download()
+        except Exception as exc:
+            raise RuntimeError(
+                "Saraga could not be downloaded. In Kaggle, enable Internet, or attach "
+                "an existing Saraga dataset and pass its directory with --data-home "
+                "together with --skip-download. "
+                f"Original error: {exc}"
+            ) from exc
+    try:
+        dataset.validate()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Saraga validation failed at {data_home}. Check that the attached/downloaded "
+            f"dataset is complete. Original error: {exc}"
+        ) from exc
 
     rows = collect_tracks(dataset, args.dataset)
     print(f"Usable labeled tracks: {len(rows)}")
@@ -665,13 +1068,35 @@ def main() -> None:
         args.segments_per_track,
         args.force_clips,
     )
+    json_dump(metrics_dir / "clip_manifest.json", manifests)
     plot_dataset_summary(manifests, figures_dir / "dataset_distribution.png")
 
+    split_track_counts = {
+        split_name: Counter(row["raga"] for row in split_rows)
+        for split_name, split_rows in splits.items()
+    }
     for split_name, items in manifests.items():
         counts = Counter(item["raga"] for item in items)
         print(f"{split_name}: {len(items)} clips, {dict(counts)}")
         if set(counts) != set(selected):
             raise RuntimeError(f"{split_name} lost one or more ragas after clipping: {counts}")
+        expected = {
+            raga: track_count * args.segments_per_track
+            for raga, track_count in split_track_counts[split_name].items()
+        }
+        if dict(counts) != expected:
+            raise RuntimeError(
+                f"{split_name} is not balanced after clipping. "
+                f"Expected {expected}, found {dict(counts)}"
+            )
+        for item in items:
+            info = sf.info(item["path"])
+            expected_frames = int(round(args.segment_seconds * SAMPLE_RATE))
+            if info.samplerate != SAMPLE_RATE or info.frames != expected_frames:
+                raise RuntimeError(
+                    f"Invalid processed clip {item['path']}: "
+                    f"{info.samplerate} Hz, {info.frames} frames"
+                )
 
     embeddings = {}
     for model_key, hf_name in MODELS.items():
@@ -686,24 +1111,44 @@ def main() -> None:
 
     results = {}
     for model_key, data in embeddings.items():
-        results[model_key] = evaluate_model(model_key, data, figures_dir, models_dir)
+        results[model_key] = evaluate_model(
+            model_key,
+            data,
+            figures_dir,
+            models_dir,
+            args,
+        )
 
     json_dump(metrics_dir / "benchmark_results.json", results)
     summary_rows = []
     for model_key, result in results.items():
-        summary_rows.append(
-            {
-                "model": model_key,
-                "best_layer": result["best_layer"],
-                **{f"clip_{key}": value for key, value in result["clip_metrics"].items()},
-                **{f"track_{key}": value for key, value in result["track_metrics"].items()},
-                **result["cluster_metrics"],
-            }
-        )
+        for classifier_key in ("linear", "external_head"):
+            classifier = result[classifier_key]
+            summary_rows.append(
+                {
+                    "model": model_key,
+                    "classifier": classifier_key,
+                    "best_layer": result["best_layer"],
+                    **{
+                        f"clip_{key}": value
+                        for key, value in classifier["clip_metrics"].items()
+                    },
+                    **{
+                        f"track_{key}": value
+                        for key, value in classifier["track_metrics"].items()
+                    },
+                    **result["cluster_metrics"],
+                }
+            )
     pd.DataFrame(summary_rows).to_csv(metrics_dir / "benchmark_summary.csv", index=False)
     write_report(output_dir / "REPORT.md", args, manifests, results)
 
-    archive_path = package_results(output_dir)
+    archive_name = (
+        "mert_raga_30s_results.zip"
+        if args.segment_seconds == 30
+        else "mert_raga_benchmark_results.zip"
+    )
+    archive_path = package_results(output_dir, archive_name)
     print("\nFinished.")
     print(f"Report: {output_dir / 'REPORT.md'}")
     print(f"Results archive: {archive_path}")

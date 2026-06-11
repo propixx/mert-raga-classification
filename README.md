@@ -1,12 +1,12 @@
 # Task 1: Foundation Models for Raga Classification
 
-[![Open balanced benchmark in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/propixx/mert-raga-classification/blob/main/notebooks/02_balanced_raga_benchmark_colab.ipynb)
+[![Open quick benchmark in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/propixx/mert-raga-classification/blob/main/notebooks/02_balanced_raga_benchmark_colab.ipynb)
 
 This project compares MERT-v1-95M and CultureMERT-95M on Indian classical raga classification using the Saraga Carnatic dataset.
 
 The core idea is to keep the experiment simple and honest:
 
-1. cut Saraga recordings into 10 second clips,
+1. cut Saraga recordings into fixed-length clips,
 2. split by original track so there is no leakage,
 3. extract embeddings from every layer of both models,
 4. visualize the embedding space,
@@ -17,21 +17,26 @@ The core idea is to keep the experiment simple and honest:
 
 For the current project iteration, use:
 
-[`notebooks/02_balanced_raga_benchmark_colab.ipynb`](notebooks/02_balanced_raga_benchmark_colab.ipynb)
+[`notebooks/03_raga_benchmark_kaggle_30s.ipynb`](notebooks/03_raga_benchmark_kaggle_30s.ipynb)
 
-It is a compact, reproducible benchmark designed for a Colab T4. Compared with
-the first quick run, it improves the experimental setup by:
+It is a reproducible 30-second benchmark designed for a Kaggle T4 or P100.
+Compared with the first quick run, it improves the experimental setup by:
 
 - guaranteeing all selected ragas appear in train, validation and test;
 - splitting by original recording rather than randomly splitting chunks;
-- sampling clips from different positions in each recording;
+- sampling four 30-second clips from different positions in each recording;
 - selecting the best hidden layer using validation macro F1;
 - reporting clip-level and track-level top-1/top-3 accuracy;
-- adding silhouette and Davies-Bouldin embedding metrics.
+- adding silhouette and Davies-Bouldin embedding metrics;
+- comparing a linear probe with a `768 -> 256 -> 6` external neural head;
+- caching each completed model/split embedding file for interrupted runs.
 
-The notebook is intentionally limited to six well-supported ragas and 216
-eight-second clips, so it remains practical while being more informative than
-the initial 200-clip exploratory run.
+The notebook is intentionally limited to six well-supported ragas, six tracks
+per raga and approximately 144 clips. The original MERT and CultureMERT
+backbones remain frozen. Only the lightweight classifiers are trained.
+
+The earlier eight-second Colab notebook is kept as a quick pipeline check:
+[`notebooks/02_balanced_raga_benchmark_colab.ipynb`](notebooks/02_balanced_raga_benchmark_colab.ipynb).
 
 ### Related Work Reviewed
 
@@ -122,7 +127,7 @@ If GPU memory is limited, run only the frozen fine-tuning experiments after the 
 
 ### Track-Level Splitting
 
-All splits are by `track_id`, not by segment. This matters because two 10 second clips from the same recording can share performer, room, microphone, tonic, and local melodic material. Segment-level splitting would make the task look easier than it really is.
+All splits are by `track_id`, not by segment. This matters because two clips from the same recording can share performer, room, microphone, tonic, and local melodic material. Segment-level splitting would make the task look easier than it really is.
 
 ### Layer-Wise Probing
 
@@ -134,22 +139,8 @@ The final analysis file is currently a draft. It should be filled only after the
 
 ## Current Status
 
-Project scaffold and scripts are ready. The environment check passes on this machine, but PyTorch reports CPU-only execution:
-
-```text
-PyTorch version: 2.3.0+cpu
-CUDA available: False
-```
-
-So the code is ready, but full embedding extraction and fine-tuning should ideally run on a GPU machine.
-
-Next real experiment step:
-
-```bash
-python scripts/01_download_saraga.py
-```
-
-After dependencies and Saraga are available, continue with the full reproduction order above.
+The 30-second Kaggle notebook and benchmark code are ready. Actual scores must
+come from a completed Kaggle GPU run; no result is filled in beforehand.
 
 ## Known Risks
 
