@@ -70,6 +70,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="saraga_carnatic", choices=["saraga_carnatic", "saraga_hindustani"])
     parser.add_argument("--data-home", default="data/raw/saraga_benchmark")
+    parser.add_argument(
+        "--kaggle-data-root",
+        default=None,
+        help="Attached Kaggle Saraga root containing numbered folders with JSON and MP3 files",
+    )
     parser.add_argument("--output-dir", default="benchmark_outputs")
     parser.add_argument("--num-ragas", type=int, default=6)
     parser.add_argument("--tracks-per-raga", type=int, default=6)
@@ -96,6 +101,7 @@ def json_dump(path: Path, value: Any) -> None:
 def experiment_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "dataset": args.dataset,
+        "source_mode": "kaggle_input" if getattr(args, "kaggle_data_root", None) else "mirdata",
         "num_ragas": args.num_ragas,
         "tracks_per_raga": args.tracks_per_raga,
         "segments_per_track": args.segments_per_track,
@@ -161,6 +167,58 @@ def collect_tracks(dataset: Any, dataset_name: str) -> list[dict[str, str]]:
                 )
         except Exception as exc:
             print(f"Skipping metadata for {track_id}: {exc}")
+    return rows
+
+
+def collect_kaggle_tracks(data_root: Path) -> list[dict[str, str]]:
+    """Read the compact Kaggle Saraga copy without mirdata's full archive."""
+    if not data_root.exists():
+        raise RuntimeError(f"Attached Kaggle Saraga directory does not exist: {data_root}")
+
+    rows = []
+    metadata_paths = sorted(data_root.rglob("*.json"))
+    for metadata_path in tqdm(metadata_paths, desc="Reading attached Kaggle Saraga metadata"):
+        try:
+            with metadata_path.open(encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            raga = None
+            for key in ("raaga", "raga", "raag"):
+                raga = metadata_name(metadata.get(key))
+                if raga:
+                    break
+            if not raga:
+                continue
+
+            audio_candidates = sorted(metadata_path.parent.glob("*.mp3"))
+            if not audio_candidates:
+                audio_candidates = sorted(metadata_path.parent.glob("*.wav"))
+            if not audio_candidates:
+                continue
+
+            exact_stem = [
+                path
+                for path in audio_candidates
+                if path.stem == metadata_path.stem
+                or path.name == f"{metadata_path.stem}.mp3.mp3"
+            ]
+            audio_path = exact_stem[0] if exact_stem else audio_candidates[0]
+            relative = metadata_path.relative_to(data_root).with_suffix("")
+            rows.append(
+                {
+                    "track_id": safe_name(relative.as_posix()),
+                    "raga": raga,
+                    "audio_path": str(audio_path.resolve()),
+                }
+            )
+        except Exception as exc:
+            print(f"Skipping attached metadata {metadata_path}: {exc}")
+
+    if not rows:
+        raise RuntimeError(
+            f"No labeled JSON/MP3 track pairs were found under {data_root}. "
+            "Attach the Kaggle dataset 'Saraga Carnatic Music Dataset' and point "
+            "--kaggle-data-root to its carnatic directory."
+        )
     return rows
 
 
@@ -1030,29 +1088,37 @@ def main() -> None:
     print(f"Experiment cache fingerprint: {fingerprint}")
     json_dump(metrics_dir / "experiment_config.json", {**config, "fingerprint": fingerprint})
 
-    data_home = Path(args.data_home).resolve()
-    data_home.mkdir(parents=True, exist_ok=True)
-    dataset = mirdata.initialize(args.dataset, data_home=str(data_home))
-    if not args.skip_download:
-        print(f"Downloading/validating {args.dataset} at {data_home}")
+    if args.kaggle_data_root:
+        if args.dataset != "saraga_carnatic":
+            raise RuntimeError("--kaggle-data-root currently supports Saraga Carnatic only.")
+        kaggle_data_root = Path(args.kaggle_data_root).resolve()
+        print(f"Using attached Kaggle Saraga data: {kaggle_data_root}")
+        rows = collect_kaggle_tracks(kaggle_data_root)
+    else:
+        data_home = Path(args.data_home).resolve()
+        data_home.mkdir(parents=True, exist_ok=True)
+        dataset = mirdata.initialize(args.dataset, data_home=str(data_home))
+        if not args.skip_download:
+            print(f"Downloading/validating {args.dataset} at {data_home}")
+            try:
+                dataset.download()
+            except Exception as exc:
+                raise RuntimeError(
+                    "Saraga could not be downloaded. The current Carnatic archive is too "
+                    "large for Kaggle's working disk. Attach the Kaggle dataset "
+                    "'Saraga Carnatic Music Dataset' and use --kaggle-data-root instead. "
+                    f"Original error: {exc}"
+                ) from exc
         try:
-            dataset.download()
+            dataset.validate()
         except Exception as exc:
             raise RuntimeError(
-                "Saraga could not be downloaded. In Kaggle, enable Internet, or attach "
-                "an existing Saraga dataset and pass its directory with --data-home "
-                "together with --skip-download. "
+                f"Saraga validation failed at {data_home}. Check that the attached/downloaded "
+                f"dataset is complete. "
                 f"Original error: {exc}"
             ) from exc
-    try:
-        dataset.validate()
-    except Exception as exc:
-        raise RuntimeError(
-            f"Saraga validation failed at {data_home}. Check that the attached/downloaded "
-            f"dataset is complete. Original error: {exc}"
-        ) from exc
+        rows = collect_tracks(dataset, args.dataset)
 
-    rows = collect_tracks(dataset, args.dataset)
     print(f"Usable labeled tracks: {len(rows)}")
     selected = choose_balanced_tracks(rows, args.num_ragas, args.tracks_per_raga)
     print("Selected ragas:")

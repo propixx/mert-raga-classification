@@ -35,6 +35,11 @@ The notebook is intentionally limited to six well-supported ragas, six tracks
 per raga and approximately 144 clips. The original MERT and CultureMERT
 backbones remain frozen. Only the lightweight classifiers are trained.
 
+Before running it, attach Kaggle's
+[`desolationofsmaug/saraga-carnatic-music-dataset`](https://www.kaggle.com/datasets/desolationofsmaug/saraga-carnatic-music-dataset)
+as a notebook Input. The current full Zenodo archive is about 14.4 GB before
+extraction and does not fit safely on Kaggle's working disk.
+
 The earlier eight-second Colab notebook is kept as a quick pipeline check:
 [`notebooks/02_balanced_raga_benchmark_colab.ipynb`](notebooks/02_balanced_raga_benchmark_colab.ipynb).
 
