@@ -176,7 +176,13 @@ def collect_kaggle_tracks(data_root: Path) -> list[dict[str, str]]:
         raise RuntimeError(f"Attached Kaggle Saraga directory does not exist: {data_root}")
 
     rows = []
-    metadata_paths = sorted(data_root.rglob("*.json"))
+    metadata_paths = []
+    for root, _, files in os.walk(data_root, followlinks=True):
+        for filename in files:
+            if filename.lower().endswith(".json"):
+                metadata_paths.append(Path(root) / filename)
+    metadata_paths.sort()
+
     for metadata_path in tqdm(metadata_paths, desc="Reading attached Kaggle Saraga metadata"):
         try:
             with metadata_path.open(encoding="utf-8") as handle:
@@ -189,9 +195,11 @@ def collect_kaggle_tracks(data_root: Path) -> list[dict[str, str]]:
             if not raga:
                 continue
 
-            audio_candidates = sorted(metadata_path.parent.glob("*.mp3"))
-            if not audio_candidates:
-                audio_candidates = sorted(metadata_path.parent.glob("*.wav"))
+            audio_candidates = sorted(
+                path
+                for path in metadata_path.parent.iterdir()
+                if path.is_file() and path.suffix.lower() in {".mp3", ".wav", ".flac", ".m4a"}
+            )
             if not audio_candidates:
                 continue
 
