@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Fine-tune only MERT's final transformer layer on the 30-second benchmark.
+"""Run frozen or final-layer MERT training on the 30-second benchmark.
 
 The experiment reuses the same five balanced ragas, 25 recordings, 100 clips
-and five track-wise folds as the frozen benchmark. The CNN and first eleven
-transformer layers stay frozen. Only transformer layer 12 and a small external
-classifier are updated.
+and five track-wise folds. In frozen mode, only the external classifier learns.
+In last-layer mode, transformer layer 12 learns with the classifier.
 """
 
 from __future__ import annotations
@@ -78,6 +77,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default="/kaggle/working/mert_last_layer_finetune",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("frozen", "last_layer"),
+        default="last_layer",
+        help="Train only the classifier, or the classifier plus MERT layer 12.",
     )
     parser.add_argument("--num-ragas", type=int, default=5)
     parser.add_argument("--tracks-per-raga", type=int, default=5)
@@ -182,8 +187,10 @@ class LastLayerMERTClassifier(nn.Module):
         num_classes: int,
         hidden_dim: int,
         dropout: float,
+        mode: str = "last_layer",
     ):
         super().__init__()
+        self.mode = mode
         self.backbone = AutoModel.from_pretrained(
             MODEL_NAME,
             trust_remote_code=True,
@@ -200,8 +207,11 @@ class LastLayerMERTClassifier(nn.Module):
         for parameter in self.backbone.parameters():
             parameter.requires_grad = False
         self.last_layer = encoder_layers[-1]
-        for parameter in self.last_layer.parameters():
-            parameter.requires_grad = True
+        if mode == "last_layer":
+            for parameter in self.last_layer.parameters():
+                parameter.requires_grad = True
+        elif mode != "frozen":
+            raise ValueError(f"Unknown training mode: {mode}")
 
         width = int(self.backbone.config.hidden_size)
         self.classifier = nn.Sequential(
@@ -215,7 +225,10 @@ class LastLayerMERTClassifier(nn.Module):
     def set_training_mode(self) -> None:
         self.train()
         self.backbone.eval()
-        self.last_layer.train()
+        if self.mode == "last_layer":
+            self.last_layer.train()
+        else:
+            self.last_layer.eval()
         self.classifier.train()
 
     def forward(
@@ -474,6 +487,7 @@ def train_fold(
         num_classes,
         args.hidden_dim,
         args.dropout,
+        args.mode,
     ).to(device)
     initial_last_layer = {
         name: value.detach().cpu().clone()
@@ -493,17 +507,24 @@ def train_fold(
     criterion = nn.CrossEntropyLoss(
         label_smoothing=args.label_smoothing
     )
-    optimizer = torch.optim.AdamW(
-        [
+    parameter_groups = []
+    if args.mode == "last_layer":
+        parameter_groups.append(
             {
                 "params": model.last_layer.parameters(),
                 "lr": args.backbone_lr,
-            },
-            {
-                "params": model.classifier.parameters(),
-                "lr": args.classifier_lr,
-            },
-        ],
+                "name": "mert_last_layer",
+            }
+        )
+    parameter_groups.append(
+        {
+            "params": model.classifier.parameters(),
+            "lr": args.classifier_lr,
+            "name": "classifier",
+        }
+    )
+    optimizer = torch.optim.AdamW(
+        parameter_groups,
         weight_decay=args.weight_decay,
     )
     scaler = torch.cuda.amp.GradScaler(enabled=True)
@@ -622,8 +643,14 @@ def train_fold(
             "val_clip_macro_f1": validation["clip_metrics"]["macro_f1"],
             "val_track_accuracy": validation["track_metrics"]["accuracy"],
             "val_track_macro_f1": validation["track_metrics"]["macro_f1"],
-            "backbone_lr": optimizer.param_groups[0]["lr"],
-            "classifier_lr": optimizer.param_groups[1]["lr"],
+            "backbone_lr": (
+                optimizer.param_groups[0]["lr"]
+                if args.mode == "last_layer"
+                else 0.0
+            ),
+            "classifier_lr": (
+                optimizer.param_groups[-1]["lr"]
+            ),
         }
         history.append(row)
         rank = (
@@ -774,6 +801,7 @@ def plot_embedding_comparison(
     tracks: np.ndarray,
     classes: np.ndarray,
     path: Path,
+    mode: str,
 ) -> dict[str, float]:
     import umap
 
@@ -786,8 +814,13 @@ def plot_embedding_comparison(
     encoded = LabelEncoder().fit(classes).transform(track_labels)
     outputs: dict[str, float] = {}
     fig, axes = plt.subplots(2, 3, figsize=(17, 10))
+    after_name = (
+        "Fine-tuned"
+        if mode == "last_layer"
+        else "Frozen after classifier training"
+    )
     for row, (name, values) in enumerate(
-        (("Pretrained", before_track), ("Fine-tuned", after_track))
+        (("Pretrained", before_track), (after_name, after_track))
     ):
         standardized = (
             values - values.mean(axis=0, keepdims=True)
@@ -814,10 +847,11 @@ def plot_embedding_comparison(
                 ).fit_transform(standardized),
             ),
         )
-        outputs[f"{name.lower()}_silhouette"] = float(
+        metric_prefix = "pretrained" if row == 0 else "after"
+        outputs[f"{metric_prefix}_silhouette"] = float(
             silhouette_score(standardized, encoded)
         )
-        outputs[f"{name.lower()}_davies_bouldin"] = float(
+        outputs[f"{metric_prefix}_davies_bouldin"] = float(
             davies_bouldin_score(standardized, encoded)
         )
         for column, (method, points) in enumerate(projections):
@@ -981,13 +1015,23 @@ def write_report(
         mean_gap,
     )
     lines = [
-        "# MERT Final-Layer Fine-Tuning Report",
+        (
+            "# MERT Final-Layer Fine-Tuning Report"
+            if args.mode == "last_layer"
+            else "# MERT Matched Frozen-Control Report"
+        ),
         "",
         "## Question",
         "",
-        "Does allowing only MERT's final transformer layer to learn improve "
-        "raga classification over the frozen 36% baseline, or does it mainly "
-        "increase overfitting?",
+        (
+            "Does allowing only MERT's final transformer layer to learn "
+            "improve raga classification over the frozen 36% baseline, or "
+            "does it mainly increase overfitting?"
+            if args.mode == "last_layer"
+            else
+            "What accuracy does the identical raw-audio training loop produce "
+            "when the entire MERT backbone is frozen?"
+        ),
         "",
         "## Dataset And Split",
         "",
@@ -1000,8 +1044,16 @@ def write_report(
         "",
         "## Trainable And Frozen Parts",
         "",
-        "- Frozen: MERT CNN feature encoder and transformer layers 1-11",
-        "- Trainable: transformer layer 12 and the external classifier",
+        (
+            "- Frozen: MERT CNN feature encoder and transformer layers 1-11"
+            if args.mode == "last_layer"
+            else "- Frozen: the complete MERT backbone"
+        ),
+        (
+            "- Trainable: transformer layer 12 and the external classifier"
+            if args.mode == "last_layer"
+            else "- Trainable: only the external classifier"
+        ),
         f"- Classifier: 768 -> {args.hidden_dim} -> 5, GELU, "
         f"dropout {args.dropout}",
         "",
@@ -1009,7 +1061,8 @@ def write_report(
         "",
         "| Variable | Value |",
         "|---|---:|",
-        f"| MERT final-layer learning rate | {args.backbone_lr} |",
+        f"| MERT final-layer learning rate | "
+        f"{args.backbone_lr if args.mode == 'last_layer' else 0.0} |",
         f"| Classifier learning rate | {args.classifier_lr} |",
         f"| Weight decay | {args.weight_decay} |",
         f"| Label smoothing | {args.label_smoothing} |",
@@ -1029,7 +1082,8 @@ def write_report(
         f"{args.baseline_track_f1:.3f} | "
         f"{args.baseline_train_accuracy:.3f} | "
         f"{args.baseline_val_accuracy:.3f} | {baseline_gap:.3f} |",
-        f"| Last-layer fine-tuned MERT | {track_accuracy:.3f} | "
+        f"| {'Last-layer fine-tuned MERT' if args.mode == 'last_layer' else 'Matched frozen control'} | "
+        f"{track_accuracy:.3f} | "
         f"{overall['track']['macro_f1']:.3f} | "
         f"{fold_frame['train_track_accuracy'].mean():.3f} | "
         f"{fold_frame['val_track_accuracy'].mean():.3f} | {mean_gap:.3f} |",
@@ -1070,8 +1124,8 @@ def write_report(
             f"{fold_frame['test_embedding_cosine_mean'].mean():.4f}",
             f"- Pretrained out-of-fold silhouette: "
             f"{cluster['pretrained_silhouette']:.3f}",
-            f"- Fine-tuned out-of-fold silhouette: "
-            f"{cluster['fine-tuned_silhouette']:.3f}",
+            f"- Post-training out-of-fold silhouette: "
+            f"{cluster['after_silhouette']:.3f}",
             "",
             "A lower embedding cosine or larger weight change means the "
             "representation moved further from the pretrained model. This "
@@ -1085,14 +1139,24 @@ def write_report(
             "",
             "## Decision",
             "",
-            decision,
+            (
+                decision
+                if args.mode == "last_layer"
+                else
+                "This result is the matched frozen control. Compare it with "
+                "the last-layer run produced by the same code. The earlier "
+                "36% frozen benchmark used validation-selected embedding "
+                "layers and regularization settings, so it answers a broader "
+                "best-frozen-system question rather than isolating the effect "
+                "of unfreezing layer 12."
+            ),
         ]
     )
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def package_results(output_dir: Path) -> Path:
-    archive_path = output_dir / "mert_last_layer_finetune_report.zip"
+    archive_path = output_dir / "mert_training_mode_report.zip"
     archive_path.unlink(missing_ok=True)
     with zipfile.ZipFile(
         archive_path,
@@ -1284,6 +1348,7 @@ def main() -> None:
         metrics_dir / "experiment_variables.json",
         {
             "model": MODEL_NAME,
+            "mode": args.mode,
             "num_ragas": args.num_ragas,
             "tracks_per_raga": args.tracks_per_raga,
             "segments_per_track": args.segments_per_track,
@@ -1323,8 +1388,18 @@ def main() -> None:
         track_ids,
         label_encoder.classes_,
         figures_dir / "embedding_before_after.png",
+        args.mode,
     )
     json_dump(metrics_dir / "embedding_drift.json", cluster)
+    np.savez_compressed(
+        metrics_dir / "oof_predictions.npz",
+        labels=encoded_labels,
+        tracks=track_ids,
+        probabilities=oof_probabilities,
+        before_embeddings=before_embeddings,
+        after_embeddings=after_embeddings,
+        classes=label_encoder.classes_,
+    )
     write_report(
         output_dir / "REPORT.md",
         args,
