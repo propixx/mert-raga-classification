@@ -269,6 +269,7 @@ def train_candidate(
     epochs: int,
     patience: int,
     seed: int,
+    class_weights: np.ndarray | None = None,
 ) -> tuple[RegularizedHead, StandardScaler, list[dict[str, float]], dict[str, float]]:
     random.seed(seed)
     np.random.seed(seed)
@@ -302,6 +303,11 @@ def train_candidate(
         weight_decay=float(config["weight_decay"]),
     )
     criterion = nn.CrossEntropyLoss(
+        weight=(
+            torch.from_numpy(class_weights.astype(np.float32)).to(device)
+            if class_weights is not None
+            else None
+        ),
         label_smoothing=float(config["label_smoothing"])
     )
     val_values = torch.from_numpy(val_scaled).to(device)
@@ -404,6 +410,7 @@ def refit_candidate(
     config: dict[str, Any],
     epochs: int,
     seed: int,
+    class_weights: np.ndarray | None = None,
 ) -> tuple[RegularizedHead, StandardScaler]:
     random.seed(seed)
     np.random.seed(seed)
@@ -435,6 +442,11 @@ def refit_candidate(
         weight_decay=float(config["weight_decay"]),
     )
     criterion = nn.CrossEntropyLoss(
+        weight=(
+            torch.from_numpy(class_weights.astype(np.float32)).to(device)
+            if class_weights is not None
+            else None
+        ),
         label_smoothing=float(config["label_smoothing"])
     )
     noise_std = float(config["noise_std"])
