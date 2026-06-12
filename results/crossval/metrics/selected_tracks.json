@@ -1,0 +1,137 @@
+{
+  "Kamās": [
+    {
+      "track_id": "carnatic_33_Sanjay_Subrahmanyan_-_Karupuram_Naarumo",
+      "raga": "Kamās",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/33/Sanjay Subrahmanyan - Karupuram Naarumo.mp3"
+    },
+    {
+      "track_id": "carnatic_14_Sanjay_Subrahmanyan_-_Sarasadalanayana",
+      "raga": "Kamās",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/14/Sanjay Subrahmanyan - Sarasadalanayana.mp3"
+    },
+    {
+      "track_id": "carnatic_64_Rithvik_Raja_-_Seetapati_Namanasuna",
+      "raga": "Kamās",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/64/Rithvik Raja - Seetapati Namanasuna.mp3"
+    },
+    {
+      "track_id": "carnatic_164_Sanjay_Subrahmanyan_-_Teerthakarayinile",
+      "raga": "Kamās",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/164/Sanjay Subrahmanyan - Teerthakarayinile.mp3"
+    },
+    {
+      "track_id": "carnatic_175_Ashwath_Narayanan_-_Marubari",
+      "raga": "Kamās",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/175/Ashwath Narayanan - Marubari.mp3"
+    }
+  ],
+  "Saurāṣtraṁ": [
+    {
+      "track_id": "carnatic_167_Sanjay_Subrahmanyan_-_Pavamana_Suthudu",
+      "raga": "Saurāṣtraṁ",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/167/Sanjay Subrahmanyan - Pavamana Suthudu.mp3"
+    },
+    {
+      "track_id": "carnatic_90_Akkarai_Sisters_-_Pavamana_Suthudu_Mangalam",
+      "raga": "Saurāṣtraṁ",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/90/Akkarai Sisters - Pavamana Suthudu Mangalam.mp3"
+    },
+    {
+      "track_id": "carnatic_114_Mahati_-_Pavamana_Suttudu_Pattu",
+      "raga": "Saurāṣtraṁ",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/114/Mahati - Pavamana Suttudu Pattu.mp3"
+    },
+    {
+      "track_id": "carnatic_20_Sanjay_Subrahmanyan_-_Pavamaana_Suthudu_Pattu",
+      "raga": "Saurāṣtraṁ",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/20/Sanjay Subrahmanyan - Pavamaana Suthudu Pattu.mp3"
+    },
+    {
+      "track_id": "carnatic_187_Vignesh_Ishwar_-_Pavamana_Suthudu_Mangalam",
+      "raga": "Saurāṣtraṁ",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/187/Vignesh Ishwar - Pavamana Suthudu Mangalam.mp3"
+    }
+  ],
+  "Tōḍi": [
+    {
+      "track_id": "carnatic_3_Cherthala_Ranganatha_Sharma_-_Karuna_Nidhi_Illalo",
+      "raga": "Tōḍi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/3/Cherthala Ranganatha Sharma - Karuna Nidhi Illalo.mp3"
+    },
+    {
+      "track_id": "carnatic_120_Kanakadurga_Venkatesh_-_Koluvamaregatha",
+      "raga": "Tōḍi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/120/Kanakadurga Venkatesh - Koluvamaregatha.mp3"
+    },
+    {
+      "track_id": "carnatic_77_Vasundara_Rajagopal_-_Munnu_Ravana",
+      "raga": "Tōḍi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/77/Vasundara Rajagopal - Munnu Ravana.mp3"
+    },
+    {
+      "track_id": "carnatic_65_Rithvik_Raja_-_Emani_Migula",
+      "raga": "Tōḍi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/65/Rithvik Raja - Emani Migula.mp3"
+    },
+    {
+      "track_id": "carnatic_9_Sanjay_Subrahmanyan_-_Eranapai",
+      "raga": "Tōḍi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/9/Sanjay Subrahmanyan - Eranapai.mp3"
+    }
+  ],
+  "Behāg": [
+    {
+      "track_id": "carnatic_31_Sanjay_Subrahmanyan_-_Innamum_Oru_thalam",
+      "raga": "Behāg",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/31/Sanjay Subrahmanyan - Innamum Oru thalam.mp3"
+    },
+    {
+      "track_id": "carnatic_184_Vignesh_Ishwar_-_Idhuthaano_Thillai_Sthalam",
+      "raga": "Behāg",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/184/Vignesh Ishwar - Idhuthaano Thillai Sthalam.mp3"
+    },
+    {
+      "track_id": "carnatic_32_Sanjay_Subrahmanyan_-_Oorilen_Kaani_Illai",
+      "raga": "Behāg",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/32/Sanjay Subrahmanyan - Oorilen Kaani Illai.mp3"
+    },
+    {
+      "track_id": "carnatic_42_S_Sundar_-_Vanajaksha_Ninne_Nammiti",
+      "raga": "Behāg",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/42/S Sundar - Vanajaksha Ninne Nammiti.mp3"
+    },
+    {
+      "track_id": "carnatic_7_Cherthala_Ranganatha_Sharma_-_Idhu_Thaano_Thillai_Sthalam",
+      "raga": "Behāg",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/7/Cherthala Ranganatha Sharma - Idhu Thaano Thillai Sthalam.mp3"
+    }
+  ],
+  "Bhairavi": [
+    {
+      "track_id": "carnatic_13_Sanjay_Subrahmanyan_-_Sri_Raghuvara_Sugunaalaya",
+      "raga": "Bhairavi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/13/Sanjay Subrahmanyan - Sri Raghuvara Sugunaalaya.mp3"
+    },
+    {
+      "track_id": "carnatic_182_Vignesh_Ishwar_-_Amba_Kamakshi",
+      "raga": "Bhairavi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/182/Vignesh Ishwar - Amba Kamakshi.mp3"
+    },
+    {
+      "track_id": "carnatic_158_Sanjay_Subrahmanyan_-_Kamakshi",
+      "raga": "Bhairavi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/158/Sanjay Subrahmanyan - Kamakshi.mp3"
+    },
+    {
+      "track_id": "carnatic_63_Rithvik_Raja_-_Chintayama_Kanda",
+      "raga": "Bhairavi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/63/Rithvik Raja - Chintayama Kanda.mp3"
+    },
+    {
+      "track_id": "carnatic_128_Srividya_Janakiraman_-_Nee_Sari_evvaramma",
+      "raga": "Bhairavi",
+      "audio_path": "/kaggle/working/saraga_kaggle/carnatic/128/Srividya Janakiraman - Nee Sari evvaramma.mp3"
+    }
+  ]
+}

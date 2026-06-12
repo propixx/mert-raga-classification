@@ -1,0 +1,44 @@
+{
+  "experiment": "five_fold_track_cross_validation_v1",
+  "dataset": "saraga_carnatic",
+  "source_mode": "kaggle_input",
+  "num_ragas": 5,
+  "tracks_per_raga": 5,
+  "excluded_ragas": [
+    "ragamalika"
+  ],
+  "segments_per_track": 4,
+  "segment_seconds": 30.0,
+  "sample_rate": 24000,
+  "folds": 5,
+  "random_seed": 42,
+  "models": {
+    "mert_95m": "m-a-p/MERT-v1-95M",
+    "culturemert_95m": "ntua-slp/CultureMERT-95M"
+  },
+  "linear_c_values": [
+    0.01,
+    0.1,
+    1.0,
+    10.0
+  ],
+  "head_configs": [
+    {
+      "lr": 0.001,
+      "dropout": 0.1
+    },
+    {
+      "lr": 0.001,
+      "dropout": 0.3
+    },
+    {
+      "lr": 0.0003,
+      "dropout": 0.1
+    },
+    {
+      "lr": 0.0003,
+      "dropout": 0.3
+    }
+  ],
+  "fingerprint": "d540eecccda4"
+}
